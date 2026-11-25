@@ -1,0 +1,1422 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate project files
+        run: |
+          mkdir -p "$(dirname settings.gradle.kts)"
+          cat > settings.gradle.kts <<'EOF_CHAN'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "ChanDownloader"
+          include(":app")
+          EOF_CHAN
+          mkdir -p "$(dirname build.gradle.kts)"
+          cat > build.gradle.kts <<'EOF_CHAN'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF_CHAN
+          mkdir -p "$(dirname gradle.properties)"
+          cat > gradle.properties <<'EOF_CHAN'
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF_CHAN
+          mkdir -p "$(dirname app/build.gradle.kts)"
+          cat > app/build.gradle.kts <<'EOF_CHAN'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.chan.downloader"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.chan.downloader"
+                  minSdk = 29
+                  targetSdk = 34
+                  versionCode = 2
+                  versionName = "1.1.0"
+                  ndk { abiFilters += listOf("arm64-v8a") }
+              }
+
+              signingConfigs {
+                  create("release") {
+                      val ks = file("chan-release.jks")
+                      if (ks.exists()) {
+                          storeFile = ks
+                          storePassword = System.getenv("KS_PASS") ?: "chan123456"
+                          keyAlias = System.getenv("KS_ALIAS") ?: "chan"
+                          keyPassword = System.getenv("KS_PASS") ?: "chan123456"
+                      }
+                  }
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                      val rel = signingConfigs.getByName("release")
+                      signingConfig = if (rel.storeFile != null) rel else signingConfigs.getByName("debug")
+                  }
+              }
+
+              packaging {
+                  jniLibs {
+                      useLegacyPackaging = true
+                      pickFirsts += "**/libc++_shared.so"
+                  }
+              }
+
+              lint {
+                  abortOnError = false
+                  checkReleaseBuilds = false
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+
+          dependencies {
+              implementation("io.github.junkfood02.youtubedl-android:library:0.17.2")
+              implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.17.2")
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+          }
+          EOF_CHAN
+          mkdir -p "$(dirname app/src/main/AndroidManifest.xml)"
+          cat > app/src/main/AndroidManifest.xml <<'EOF_CHAN'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+              <application
+                  android:name=".App"
+                  android:allowBackup="false"
+                  android:extractNativeLibs="true"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="찬다운로더"
+                  android:supportsRtl="true"
+                  android:theme="@style/AppTheme">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <!-- 다른 앱에서 '공유 → 찬다운로더' 로 링크 받기 -->
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="text/plain" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".DownloadService"
+                      android:exported="false"
+                      android:foregroundServiceType="dataSync" />
+              </application>
+          </manifest>
+          EOF_CHAN
+          mkdir -p "$(dirname app/src/main/res/values/themes.xml)"
+          cat > app/src/main/res/values/themes.xml <<'EOF_CHAN'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+                  <item name="colorPrimary">#2563EB</item>
+                  <item name="colorAccent">#2563EB</item>
+                  <item name="android:statusBarColor">#2563EB</item>
+              </style>
+          </resources>
+          EOF_CHAN
+          mkdir -p "$(dirname app/src/main/res/drawable/ic_launcher.xml)"
+          cat > app/src/main/res/drawable/ic_launcher.xml <<'EOF_CHAN'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#2563EB" android:pathData="M54,4a50,50 0,1 1,0 100a50,50 0,1 1,0 -100z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M48,26h12v30h12L54,76 36,56h12z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M32,80h44v7H32z"/>
+          </vector>
+          EOF_CHAN
+          mkdir -p "$(dirname app/src/main/java/com/chan/downloader/App.kt)"
+          cat > app/src/main/java/com/chan/downloader/App.kt <<'EOF_CHAN'
+          package com.chan.downloader
+
+          import android.app.Application
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import com.yausername.ffmpeg.FFmpeg
+          import com.yausername.youtubedl_android.YoutubeDL
+          import kotlinx.coroutines.CoroutineScope
+          import kotlinx.coroutines.Deferred
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.SupervisorJob
+          import kotlinx.coroutines.async
+
+          class App : Application() {
+
+              companion object {
+                  const val CHANNEL_ID = "download"
+                  val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+                  /** yt-dlp + python + ffmpeg 초기화 (첫 실행 때 압축 해제라 몇 초 걸림) */
+                  lateinit var initJob: Deferred<Result<Unit>>
+              }
+
+              override fun onCreate() {
+                  super.onCreate()
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(
+                      NotificationChannel(CHANNEL_ID, "다운로드", NotificationManager.IMPORTANCE_LOW)
+                  )
+                  DownloadManager.load(this)
+                  initJob = appScope.async {
+                      runCatching {
+                          YoutubeDL.getInstance().init(this@App)
+                          FFmpeg.getInstance().init(this@App)
+                      }
+                  }
+              }
+          }
+          EOF_CHAN
+          mkdir -p "$(dirname app/src/main/java/com/chan/downloader/DownloadManager.kt)"
+          cat > app/src/main/java/com/chan/downloader/DownloadManager.kt <<'EOF_CHAN'
+          package com.chan.downloader
+
+          import android.content.ContentValues
+          import android.content.Context
+          import android.net.Uri
+          import android.os.Environment
+          import android.provider.MediaStore
+          import android.webkit.CookieManager
+          import android.webkit.MimeTypeMap
+          import com.yausername.youtubedl_android.YoutubeDL
+          import com.yausername.youtubedl_android.YoutubeDLRequest
+          import kotlinx.coroutines.Job
+          import kotlinx.coroutines.flow.MutableStateFlow
+          import kotlinx.coroutines.flow.StateFlow
+          import kotlinx.coroutines.flow.update
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.sync.Semaphore
+          import kotlinx.coroutines.sync.withPermit
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.File
+          import java.net.URI
+
+          enum class Status { QUEUED, RUNNING, DONE, FAILED, CANCELED }
+
+          /** 다운로드 옵션 (화질 선택 결과) */
+          data class DlOption(
+              val label: String,
+              val args: List<String>,          // yt-dlp 추가 인자
+              val audio: Boolean = false
+          )
+
+          data class Task(
+              val id: String,
+              val url: String,
+              val title: String,
+              val option: String,
+              val status: Status = Status.QUEUED,
+              val progress: Int = -1,
+              val message: String = "대기 중",
+              val fileName: String? = null,
+              val uri: String? = null,
+              val mime: String? = null,
+              val size: Long = 0,
+              val time: Long = System.currentTimeMillis()
+          ) {
+              val active get() = status == Status.QUEUED || status == Status.RUNNING
+          }
+
+          object DownloadManager {
+
+              const val SAVE_FOLDER = "ChanDownloader"
+              private const val MAX_PARALLEL = 2
+              private const val MAX_HISTORY = 300
+
+              private val _tasks = MutableStateFlow<List<Task>>(emptyList())
+              val tasks: StateFlow<List<Task>> = _tasks
+
+              private val jobs = HashMap<String, Job>()
+              private val semaphore = Semaphore(MAX_PARALLEL)
+              private lateinit var app: Context
+
+              // ---------- 프리셋 옵션 ----------
+              val BEST_VIDEO = DlOption("최고화질 MP4", listOf("-f", "bv*+ba/b", "-S", "res,ext:mp4:m4a", "--merge-output-format", "mp4"))
+              val MP3 = DlOption("MP3 음원", listOf("-x", "--audio-format", "mp3", "--audio-quality", "0"), audio = true)
+              val M4A = DlOption("M4A 원본 음원", listOf("-f", "ba[ext=m4a]/ba", "-x", "--audio-format", "m4a"), audio = true)
+
+              fun heightOption(h: Int) = DlOption(
+                  "${h}p MP4",
+                  listOf("-f", "bv*[height<=$h]+ba/b[height<=$h]/b", "-S", "res,ext:mp4:m4a", "--merge-output-format", "mp4")
+              )
+
+              // ---------- 기록 저장 ----------
+              fun load(ctx: Context) {
+                  app = ctx.applicationContext
+                  val raw = app.getSharedPreferences("history", Context.MODE_PRIVATE).getString("items", "[]")
+                  val list = runCatching {
+                      val arr = JSONArray(raw)
+                      (0 until arr.length()).map { i ->
+                          val o = arr.getJSONObject(i)
+                          Task(
+                              id = o.getString("id"),
+                              url = o.optString("url"),
+                              title = o.optString("title"),
+                              option = o.optString("option"),
+                              status = runCatching { Status.valueOf(o.optString("status")) }.getOrDefault(Status.FAILED),
+                              progress = 100,
+                              message = o.optString("message"),
+                              fileName = o.optString("fileName").ifEmpty { null },
+                              uri = o.optString("uri").ifEmpty { null },
+                              mime = o.optString("mime").ifEmpty { null },
+                              size = o.optLong("size"),
+                              time = o.optLong("time")
+                          )
+                      }
+                  }.getOrDefault(emptyList())
+                  _tasks.value = list
+              }
+
+              private fun save() {
+                  val arr = JSONArray()
+                  _tasks.value.filter { !it.active }.take(MAX_HISTORY).forEach { t ->
+                      arr.put(JSONObject().apply {
+                          put("id", t.id); put("url", t.url); put("title", t.title); put("option", t.option)
+                          put("status", t.status.name); put("message", t.message)
+                          put("fileName", t.fileName ?: ""); put("uri", t.uri ?: ""); put("mime", t.mime ?: "")
+                          put("size", t.size); put("time", t.time)
+                      })
+                  }
+                  app.getSharedPreferences("history", Context.MODE_PRIVATE).edit().putString("items", arr.toString()).apply()
+              }
+
+              private fun update(id: String, block: (Task) -> Task) {
+                  _tasks.update { list -> list.map { if (it.id == id) block(it) else it } }
+              }
+
+              fun hasActive() = _tasks.value.any { it.active }
+
+              // ---------- 다운로드 ----------
+              fun enqueue(ctx: Context, url: String, title: String?, option: DlOption, referer: String? = null) {
+                  val id = "t" + System.currentTimeMillis() + (0..999).random()
+                  val task = Task(id, url, title?.takeIf { it.isNotBlank() } ?: url, option.label)
+                  _tasks.update { listOf(task) + it }
+                  val cookieFile = writeCookies(url, referer)
+                  jobs[id] = App.appScope.launch {
+                      semaphore.withPermit { run(task, option, referer, cookieFile) }
+                      jobs.remove(id)
+                  }
+                  DownloadService.ensureRunning(ctx)
+              }
+
+              fun cancel(id: String) {
+                  runCatching { YoutubeDL.getInstance().destroyProcessById(id) }
+                  jobs.remove(id)?.cancel()
+                  update(id) { it.copy(status = Status.CANCELED, message = "취소됨") }
+                  save()
+              }
+
+              fun retry(ctx: Context, t: Task) {
+                  remove(t.id, deleteFile = false)
+                  val opt = when (t.option) {
+                      MP3.label -> MP3
+                      M4A.label -> M4A
+                      BEST_VIDEO.label -> BEST_VIDEO
+                      else -> Regex("""(\d+)p""").find(t.option)?.groupValues?.get(1)?.toIntOrNull()?.let { heightOption(it) } ?: BEST_VIDEO
+                  }
+                  enqueue(ctx, t.url, t.title, opt)
+              }
+
+              fun remove(id: String, deleteFile: Boolean) {
+                  val t = _tasks.value.firstOrNull { it.id == id } ?: return
+                  if (t.active) cancel(id)
+                  if (deleteFile && t.uri != null) runCatching { app.contentResolver.delete(Uri.parse(t.uri), null, null) }
+                  _tasks.update { list -> list.filter { it.id != id } }
+                  save()
+              }
+
+              fun clearFinished() {
+                  _tasks.update { list -> list.filter { it.active } }
+                  save()
+              }
+
+              private suspend fun run(task: Task, option: DlOption, referer: String?, cookieFile: File?) {
+                  val id = task.id
+                  if (_tasks.value.firstOrNull { it.id == id }?.status == Status.CANCELED) return
+                  update(id) { it.copy(status = Status.RUNNING, message = "준비 중...") }
+
+                  val init = App.initJob.await()
+                  if (init.isFailure) {
+                      fail(id, "초기화 실패: ${init.exceptionOrNull()?.message}"); return
+                  }
+
+                  val tmpDir = File(app.cacheDir, "dl_$id").apply { mkdirs() }
+                  try {
+                      val req = YoutubeDLRequest(task.url).apply {
+                          addOption("-o", tmpDir.absolutePath + "/%(title).80B [%(id)s].%(ext)s")
+                          addOption("--no-playlist")
+                          addOption("--no-mtime")
+                          addOption("--windows-filenames")
+                          if (referer != null) addOption("--referer", referer)
+                          if (cookieFile != null) addOption("--cookies", cookieFile.absolutePath)
+                          option.args.forEachIndexed { i, a ->
+                              // "-f" 다음 값처럼 짝으로 넣기 위해 순서대로 그대로 추가
+                              if (a.startsWith("-")) {
+                                  val next = option.args.getOrNull(i + 1)
+                                  if (next != null && !next.startsWith("-")) addOption(a, next) else addOption(a)
+                              }
+                          }
+                      }
+
+                      update(id) { it.copy(message = "다운로드 중...") }
+                      YoutubeDL.getInstance().execute(req, id) { progress, eta, _ ->
+                          val p = progress.toInt().coerceIn(-1, 100)
+                          val etaText = if (eta > 0) " · ${formatEta(eta)} 남음" else ""
+                          update(id) { it.copy(progress = p, message = "다운로드 중 ${p.coerceAtLeast(0)}%$etaText") }
+                      }
+
+                      val files = tmpDir.listFiles()
+                          ?.filter { it.isFile && it.length() > 0 && !it.name.endsWith(".part") && !it.name.endsWith(".ytdl") }
+                          .orEmpty()
+                          .sortedByDescending { it.length() }
+                      val main = files.firstOrNull()
+                      if (main == null) {
+                          fail(id, "받은 파일이 없어요. 지원하지 않는 링크일 수 있어요."); return
+                      }
+                      update(id) { it.copy(progress = 100, message = "저장 중...") }
+                      val (uri, mime) = saveToDownloads(main)
+                      val niceTitle = main.nameWithoutExtension.replace(Regex("""\s*\[[^\]]+]$"""), "")
+                      update(id) {
+                          it.copy(
+                              status = Status.DONE, progress = 100, message = "완료",
+                              title = niceTitle.ifBlank { it.title }, fileName = main.name,
+                              uri = uri.toString(), mime = mime, size = main.length(), time = System.currentTimeMillis()
+                          )
+                      }
+                  } catch (e: YoutubeDL.CanceledException) {
+                      update(id) { it.copy(status = Status.CANCELED, message = "취소됨") }
+                  } catch (e: kotlinx.coroutines.CancellationException) {
+                      update(id) { it.copy(status = Status.CANCELED, message = "취소됨") }
+                  } catch (e: Exception) {
+                      val msg = e.message?.lines()?.lastOrNull { it.contains("ERROR") }
+                          ?: e.message?.lines()?.lastOrNull { it.isNotBlank() } ?: e.toString()
+                      fail(id, msg.take(300))
+                  } finally {
+                      tmpDir.deleteRecursively()
+                      cookieFile?.delete()
+                      save()
+                  }
+              }
+
+              private fun fail(id: String, msg: String) {
+                  update(id) { it.copy(status = Status.FAILED, message = msg) }
+              }
+
+              private fun formatEta(sec: Long): String =
+                  if (sec >= 60) "${sec / 60}분 ${sec % 60}초" else "${sec}초"
+
+              /** 앱 브라우저에서 로그인한 쿠키를 yt-dlp 에 넘김 (인스타·페이스북 등 로그인 필요한 영상용) */
+              private fun writeCookies(url: String, referer: String?): File? = runCatching {
+                  val cm = CookieManager.getInstance()
+                  val hosts = listOfNotNull(url, referer).mapNotNull { runCatching { URI(it).host }.getOrNull() }.distinct()
+                  val sb = StringBuilder("# Netscape HTTP Cookie File\n")
+                  val expiry = System.currentTimeMillis() / 1000 + 365L * 24 * 3600
+                  var count = 0
+                  for (host in hosts) {
+                      val parts = host.split(".")
+                      val root = if (parts.size >= 2) parts.takeLast(2).joinToString(".") else host
+                      val cookie = cm.getCookie("https://$host") ?: continue
+                      cookie.split(";").map { it.trim() }.filter { it.contains("=") }.forEach { kv ->
+                          val name = kv.substringBefore("=")
+                          val value = kv.substringAfter("=")
+                          sb.append(".$root\tTRUE\t/\tTRUE\t$expiry\t$name\t$value\n")
+                          count++
+                      }
+                  }
+                  if (count == 0) return null
+                  File(app.cacheDir, "cookies_${System.nanoTime()}.txt").apply { writeText(sb.toString()) }
+              }.getOrNull()
+
+              /** 앱 캐시 → 공용 다운로드/ChanDownloader 폴더 (권한 필요 없음) */
+              private fun saveToDownloads(src: File): Pair<Uri, String> {
+                  val ext = src.extension.lowercase()
+                  val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+                  val values = ContentValues().apply {
+                      put(MediaStore.Downloads.DISPLAY_NAME, src.name)
+                      put(MediaStore.Downloads.MIME_TYPE, mime)
+                      put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/" + SAVE_FOLDER)
+                      put(MediaStore.Downloads.IS_PENDING, 1)
+                  }
+                  val resolver = app.contentResolver
+                  val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                      ?: throw IllegalStateException("저장 위치를 만들 수 없어요")
+                  resolver.openOutputStream(uri)!!.use { out -> src.inputStream().use { it.copyTo(out) } }
+                  values.clear()
+                  values.put(MediaStore.Downloads.IS_PENDING, 0)
+                  resolver.update(uri, values, null, null)
+                  return uri to mime
+              }
+          }
+          EOF_CHAN
+          mkdir -p "$(dirname app/src/main/java/com/chan/downloader/DownloadService.kt)"
+          cat > app/src/main/java/com/chan/downloader/DownloadService.kt <<'EOF_CHAN'
+          package com.chan.downloader
+
+          import android.app.Notification
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.os.IBinder
+          import androidx.core.app.NotificationCompat
+          import androidx.core.app.NotificationManagerCompat
+          import androidx.core.app.ServiceCompat
+          import kotlinx.coroutines.Job
+          import kotlinx.coroutines.launch
+
+          /** 다운로드가 하나라도 진행 중이면 앱을 나가도 계속 받도록 붙잡아 두는 서비스 */
+          class DownloadService : Service() {
+
+              companion object {
+                  private const val NOTI_ID = 1
+                  private const val DONE_NOTI_ID = 2
+
+                  fun ensureRunning(ctx: Context) {
+                      ctx.startForegroundService(Intent(ctx, DownloadService::class.java))
+                  }
+              }
+
+              private var watcher: Job? = null
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  ServiceCompat.startForeground(
+                      this, NOTI_ID, build("준비 중...", -1, 1),
+                      ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                  )
+                  if (watcher?.isActive != true) {
+                      watcher = App.appScope.launch {
+                          var hadActive = false
+                          DownloadManager.tasks.collect { list ->
+                              val active = list.filter { it.active }
+                              if (active.isEmpty()) {
+                                  if (hadActive) notifyDone(list)
+                                  ServiceCompat.stopForeground(this@DownloadService, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                                  stopSelf()
+                                  watcher?.cancel()
+                                  return@collect
+                              }
+                              hadActive = true
+                              val first = active.first()
+                              val text = if (active.size == 1) first.title else "${active.size}개 받는 중 · ${first.title}"
+                              val p = if (active.size == 1) first.progress else active.map { it.progress.coerceAtLeast(0) }.average().toInt()
+                              post(NOTI_ID, build(text, p, active.size))
+                              kotlinx.coroutines.delay(700)
+                          }
+                      }
+                  }
+                  return START_NOT_STICKY
+              }
+
+              private fun notifyDone(list: List<Task>) {
+                  val last = list.firstOrNull() ?: return
+                  val text = when (last.status) {
+                      Status.DONE -> "완료: ${last.title}"
+                      Status.FAILED -> "실패: ${last.title}"
+                      else -> "다운로드가 끝났어요"
+                  }
+                  post(
+                      DONE_NOTI_ID,
+                      NotificationCompat.Builder(this, App.CHANNEL_ID)
+                          .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                          .setContentTitle("찬다운로더")
+                          .setContentText(text)
+                          .setContentIntent(openApp())
+                          .setAutoCancel(true)
+                          .build()
+                  )
+              }
+
+              private fun openApp(): PendingIntent = PendingIntent.getActivity(
+                  this, 0,
+                  Intent(this, MainActivity::class.java).putExtra(MainActivity.EXTRA_TAB, MainActivity.TAB_FILES),
+                  PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+              )
+
+              private fun build(text: String, progress: Int, count: Int): Notification =
+                  NotificationCompat.Builder(this, App.CHANNEL_ID)
+                      .setSmallIcon(android.R.drawable.stat_sys_download)
+                      .setContentTitle(if (count > 1) "찬다운로더 · ${count}개 다운로드 중" else "찬다운로더 · 다운로드 중")
+                      .setContentText(text)
+                      .setOngoing(true)
+                      .setOnlyAlertOnce(true)
+                      .setContentIntent(openApp())
+                      .setProgress(100, progress.coerceAtLeast(0), progress < 0)
+                      .build()
+
+              private fun post(id: Int, n: Notification) {
+                  val nm = NotificationManagerCompat.from(this)
+                  if (!nm.areNotificationsEnabled()) return
+                  runCatching { nm.notify(id, n) }
+              }
+          }
+          EOF_CHAN
+          mkdir -p "$(dirname app/src/main/java/com/chan/downloader/MainActivity.kt)"
+          cat > app/src/main/java/com/chan/downloader/MainActivity.kt <<'EOF_CHAN'
+          package com.chan.downloader
+
+          import android.Manifest
+          import android.annotation.SuppressLint
+          import android.app.AlertDialog
+          import android.content.ClipboardManager
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Bitmap
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.text.TextUtils
+          import android.view.Gravity
+          import android.view.KeyEvent
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+          import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+          import android.view.inputmethod.EditorInfo
+          import android.view.inputmethod.InputMethodManager
+          import android.webkit.CookieManager
+          import android.webkit.WebChromeClient
+          import android.webkit.WebResourceRequest
+          import android.webkit.WebResourceResponse
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.ProgressBar
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.activity.OnBackPressedCallback
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.content.ContextCompat
+          import androidx.lifecycle.Lifecycle
+          import androidx.lifecycle.lifecycleScope
+          import androidx.lifecycle.repeatOnLifecycle
+          import com.yausername.youtubedl_android.YoutubeDL
+          import com.yausername.youtubedl_android.YoutubeDLRequest
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          class MainActivity : AppCompatActivity() {
+
+              companion object {
+                  const val EXTRA_TAB = "tab"
+                  const val TAB_BROWSER = 0
+                  const val TAB_LINK = 1
+                  const val TAB_FILES = 2
+              }
+
+              private val blue = Color.parseColor("#2563EB")
+              private val gray = Color.parseColor("#888888")
+
+              // 공통
+              private lateinit var pages: List<View>
+              private lateinit var tabButtons: List<TextView>
+              private var currentTab = TAB_BROWSER
+
+              // 브라우저
+              private lateinit var webView: WebView
+              private lateinit var addressBar: EditText
+              private lateinit var pageProgress: ProgressBar
+              private lateinit var homeView: View
+              private lateinit var fab: TextView
+              private val detected = LinkedHashSet<String>()
+
+              // 링크
+              private lateinit var urlInput: EditText
+              private lateinit var updateBtn: Button
+
+              // 다운로드 목록
+              private lateinit var listBox: LinearLayout
+              private lateinit var emptyText: TextView
+
+              private val shortcuts = listOf(
+                  "유튜브" to "https://m.youtube.com",
+                  "인스타그램" to "https://www.instagram.com",
+                  "페이스북" to "https://m.facebook.com",
+                  "X (트위터)" to "https://x.com",
+                  "틱톡" to "https://www.tiktok.com",
+                  "네이버TV" to "https://tv.naver.com",
+                  "Vimeo" to "https://vimeo.com",
+                  "Dailymotion" to "https://www.dailymotion.com",
+                  "SoundCloud" to "https://m.soundcloud.com",
+                  "Reddit" to "https://www.reddit.com",
+                  "Pinterest" to "https://www.pinterest.com",
+                  "Twitch" to "https://m.twitch.tv"
+              )
+
+              private val mediaRegex = Regex("""\.(mp4|m3u8|webm|m4a|mp3|mov|mpd)(\?|#|$)""", RegexOption.IGNORE_CASE)
+
+              // ==================================================================
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(buildUi())
+
+                  if (Build.VERSION.SDK_INT >= 33 &&
+                      ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                  ) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 10)
+
+                  onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+                      override fun handleOnBackPressed() {
+                          when {
+                              currentTab == TAB_BROWSER && homeView.visibility != View.VISIBLE && webView.canGoBack() -> webView.goBack()
+                              currentTab == TAB_BROWSER && homeView.visibility != View.VISIBLE -> showHome()
+                              currentTab != TAB_BROWSER -> selectTab(TAB_BROWSER)
+                              else -> { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
+                          }
+                      }
+                  })
+
+                  lifecycleScope.launch {
+                      repeatOnLifecycle(Lifecycle.State.STARTED) {
+                          DownloadManager.tasks.collect { list ->
+                              renderList(list)
+                              delay(300)
+                          }
+                      }
+                  }
+
+                  selectTab(intent?.getIntExtra(EXTRA_TAB, TAB_BROWSER) ?: TAB_BROWSER)
+                  handleShare(intent)
+              }
+
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  if (intent.hasExtra(EXTRA_TAB)) selectTab(intent.getIntExtra(EXTRA_TAB, TAB_FILES))
+                  handleShare(intent)
+              }
+
+              override fun onPause() { super.onPause(); webView.onPause(); CookieManager.getInstance().flush() }
+              override fun onResume() { super.onResume(); webView.onResume() }
+
+              override fun onWindowFocusChanged(hasFocus: Boolean) {
+                  super.onWindowFocusChanged(hasFocus)
+                  if (hasFocus) checkClipboard()
+              }
+
+              // ==================================================================
+              // 공유 / 클립보드
+              private fun handleShare(intent: Intent?) {
+                  if (intent?.action != Intent.ACTION_SEND) return
+                  val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
+                  val url = extractUrl(text) ?: return
+                  intent.action = null
+                  urlInput.setText(url)
+                  selectTab(TAB_LINK)
+                  showFormatPicker(url, null, null)
+              }
+
+              private fun checkClipboard() {
+                  val cm = getSystemService(ClipboardManager::class.java) ?: return
+                  val text = runCatching { cm.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString() }.getOrNull() ?: return
+                  val url = extractUrl(text) ?: return
+                  val prefs = getSharedPreferences("app", Context.MODE_PRIVATE)
+                  if (prefs.getString("lastClip", null) == url) return
+                  prefs.edit().putString("lastClip", url).apply()
+                  AlertDialog.Builder(this)
+                      .setTitle("복사한 링크를 받을까요?")
+                      .setMessage(url)
+                      .setPositiveButton("화질 선택") { _, _ -> urlInput.setText(url); showFormatPicker(url, null, null) }
+                      .setNeutralButton("브라우저로 열기") { _, _ -> selectTab(TAB_BROWSER); loadUrl(url) }
+                      .setNegativeButton("무시", null)
+                      .show()
+              }
+
+              private fun extractUrl(text: String): String? =
+                  Regex("""https?://\S+""").find(text)?.value?.trimEnd('.', ',', ')', ']', '"', '\'')
+
+              // ==================================================================
+              // 화질 선택
+              private fun showFormatPicker(url: String, referer: String?, titleHint: String?) {
+                  val loading = AlertDialog.Builder(this)
+                      .setTitle("영상 분석 중...")
+                      .setMessage("잠시만 기다려 주세요.\n$url")
+                      .setCancelable(true)
+                      .show()
+
+                  lifecycleScope.launch {
+                      val result = withContext(Dispatchers.IO) {
+                          runCatching {
+                              App.initJob.await().getOrThrow()
+                              val req = YoutubeDLRequest(url).apply {
+                                  addOption("--no-playlist")
+                                  if (referer != null) addOption("--referer", referer)
+                              }
+                              YoutubeDL.getInstance().getInfo(req)
+                          }
+                      }
+                      if (!loading.isShowing) return@launch
+                      loading.dismiss()
+
+                      val info = result.getOrNull()
+                      val title = info?.title ?: titleHint ?: url
+                      val options = ArrayList<DlOption>()
+                      options += DownloadManager.BEST_VIDEO
+                      info?.formats
+                          ?.filter { it.height > 0 && it.vcodec != null && it.vcodec != "none" }
+                          ?.map { it.height }
+                          ?.distinct()
+                          ?.sortedDescending()
+                          ?.forEach { h -> options += DownloadManager.heightOption(h) }
+                      options += DownloadManager.MP3
+                      options += DownloadManager.M4A
+
+                      val labels = options.map { opt ->
+                          if (opt === DownloadManager.BEST_VIDEO) "⭐ ${opt.label} (추천)" else opt.label
+                      }.toTypedArray<CharSequence>()
+
+                      val dur = info?.duration ?: 0
+                      val subtitle = buildString {
+                          if (dur > 0) append("길이 ${dur / 60}:${"%02d".format(dur % 60)}  ")
+                          info?.extractorKey?.let { append("· $it") }
+                          if (info == null) {
+                              append("⚠ 분석 실패 — 그래도 받아볼 수 있어요\n")
+                              append(result.exceptionOrNull()?.message?.lines()?.lastOrNull { it.isNotBlank() }?.take(150) ?: "")
+                          }
+                      }
+                      if (subtitle.isNotBlank()) Toast.makeText(this@MainActivity, subtitle, Toast.LENGTH_LONG).show()
+
+                      AlertDialog.Builder(this@MainActivity)
+                          .setTitle(title)
+                          .setItems(labels) { _, which ->
+                              DownloadManager.enqueue(this@MainActivity, url, title, options[which], referer)
+                              Toast.makeText(this@MainActivity, "다운로드를 시작했어요", Toast.LENGTH_SHORT).show()
+                              selectTab(TAB_FILES)
+                          }
+                          .setNegativeButton("취소", null)
+                          .show()
+                  }
+              }
+
+              // ==================================================================
+              // 브라우저
+              private fun loadUrl(input: String) {
+                  val t = input.trim()
+                  if (t.isEmpty()) return
+                  val url = when {
+                      t.startsWith("http://") || t.startsWith("https://") -> t
+                      t.contains(".") && !t.contains(" ") -> "https://$t"
+                      else -> "https://www.google.com/search?q=" + Uri.encode(t)
+                  }
+                  homeView.visibility = View.GONE
+                  webView.visibility = View.VISIBLE
+                  webView.loadUrl(url)
+                  hideKeyboard()
+              }
+
+              private fun showHome() {
+                  homeView.visibility = View.VISIBLE
+                  webView.visibility = View.INVISIBLE
+                  addressBar.setText("")
+                  synchronized(detected) { detected.clear() }
+                  updateFab()
+              }
+
+              private fun updateFab() {
+                  val n = synchronized(detected) { detected.size }
+                  fab.text = if (n > 0) "⬇  다운로드 · 영상 ${n}개 감지" else "⬇  이 페이지 다운로드"
+                  fab.visibility = if (homeView.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+              }
+
+              private fun onFabClick() {
+                  val pageUrl = webView.url ?: return
+                  val pageTitle = webView.title
+                  val media = synchronized(detected) { detected.toList() }.reversed()
+                  if (media.isEmpty()) {
+                      showFormatPicker(pageUrl, null, pageTitle)
+                      return
+                  }
+                  val items = (listOf("🔍 이 페이지 분석해서 받기 (추천)") +
+                      media.map { "🎬 " + it.substringBefore("?").substringAfterLast("/").ifBlank { it }.take(60) })
+                      .toTypedArray<CharSequence>()
+                  AlertDialog.Builder(this)
+                      .setTitle("무엇을 받을까요?")
+                      .setItems(items) { _, which ->
+                          if (which == 0) showFormatPicker(pageUrl, null, pageTitle)
+                          else {
+                              DownloadManager.enqueue(this, media[which - 1], pageTitle, DownloadManager.BEST_VIDEO, pageUrl)
+                              Toast.makeText(this, "다운로드를 시작했어요", Toast.LENGTH_SHORT).show()
+                              selectTab(TAB_FILES)
+                          }
+                      }
+                      .setNegativeButton("취소", null)
+                      .show()
+              }
+
+              @SuppressLint("SetJavaScriptEnabled")
+              private fun setupWebView(w: WebView) {
+                  w.settings.apply {
+                      javaScriptEnabled = true
+                      domStorageEnabled = true
+                      loadWithOverviewMode = true
+                      useWideViewPort = true
+                      setSupportZoom(true)
+                      builtInZoomControls = true
+                      displayZoomControls = false
+                      mediaPlaybackRequiresUserGesture = true
+                  }
+                  CookieManager.getInstance().setAcceptCookie(true)
+                  CookieManager.getInstance().setAcceptThirdPartyCookies(w, true)
+
+                  w.webViewClient = object : WebViewClient() {
+                      override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                          val s = request.url.scheme ?: return false
+                          if (s == "http" || s == "https") return false
+                          // intent://, 앱 링크 등은 무시 (앱으로 튕겨나가지 않게)
+                          return true
+                      }
+
+                      override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                          addressBar.setText(url)
+                          synchronized(detected) { detected.clear() }
+                          updateFab()
+                      }
+
+                      override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                          val u = request.url.toString()
+                          if (mediaRegex.containsMatchIn(u.substringBefore("?") + "?") || mediaRegex.containsMatchIn(u)) {
+                              val added = synchronized(detected) { detected.add(u) }
+                              if (added) runOnUiThread { updateFab() }
+                          }
+                          return null
+                      }
+                  }
+                  w.webChromeClient = object : WebChromeClient() {
+                      override fun onProgressChanged(view: WebView, newProgress: Int) {
+                          pageProgress.progress = newProgress
+                          pageProgress.visibility = if (newProgress in 1..99) View.VISIBLE else View.INVISIBLE
+                      }
+                  }
+              }
+
+              // ==================================================================
+              // 다운로드 목록
+              private fun renderList(list: List<Task>) {
+                  listBox.removeAllViews()
+                  emptyText.visibility = if (list.isEmpty()) View.VISIBLE else View.GONE
+                  val active = list.count { it.active }
+                  tabButtons[TAB_FILES].text = if (active > 0) "⬇ 다운로드 ($active)" else "⬇ 다운로드"
+                  for (t in list) listBox.addView(taskView(t))
+              }
+
+              private fun taskView(t: Task): View {
+                  val card = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(14), dp(12), dp(14), dp(12))
+                      background = rounded(Color.parseColor("#122563EB"), 12)
+                  }
+                  card.addView(TextView(this).apply {
+                      text = (when (t.status) {
+                          Status.DONE -> if (t.mime?.startsWith("audio") == true) "🎵 " else "🎬 "
+                          Status.FAILED -> "⚠ "
+                          Status.CANCELED -> "✕ "
+                          else -> "⬇ "
+                      }) + t.title
+                      textSize = 15f
+                      maxLines = 2
+                      ellipsize = TextUtils.TruncateAt.END
+                      setTypeface(typeface, Typeface.BOLD)
+                  })
+                  val sub = buildString {
+                      append(t.option)
+                      if (t.status == Status.DONE) {
+                          append(" · ").append(humanSize(t.size))
+                          append(" · ").append(SimpleDateFormat("M/d HH:mm", Locale.KOREA).format(Date(t.time)))
+                      } else append(" · ").append(t.message)
+                  }
+                  card.addView(TextView(this).apply {
+                      text = sub
+                      textSize = 12f
+                      setTextColor(if (t.status == Status.FAILED) Color.parseColor("#DC2626") else gray)
+                      maxLines = 3
+                      ellipsize = TextUtils.TruncateAt.END
+                      setPadding(0, dp(3), 0, 0)
+                  })
+                  if (t.active) {
+                      card.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+                          max = 100
+                          isIndeterminate = t.progress < 0
+                          if (t.progress >= 0) progress = t.progress
+                      }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(6) })
+                  }
+
+                  val row = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.END
+                      setPadding(0, dp(6), 0, 0)
+                  }
+                  fun act(label: String, onClick: () -> Unit) {
+                      row.addView(TextView(this).apply {
+                          text = label
+                          textSize = 14f
+                          setTextColor(blue)
+                          setPadding(dp(12), dp(6), dp(12), dp(6))
+                          setOnClickListener { onClick() }
+                      })
+                  }
+                  when (t.status) {
+                      Status.QUEUED, Status.RUNNING -> act("취소") { DownloadManager.cancel(t.id) }
+                      Status.DONE -> {
+                          act("열기") { openFile(t) }
+                          act("공유") { shareFile(t) }
+                          act("삭제") { confirmDelete(t) }
+                      }
+                      Status.FAILED, Status.CANCELED -> {
+                          act("다시 받기") { DownloadManager.retry(this, t) }
+                          act("링크 복사") { copyText(t.url) }
+                          act("삭제") { DownloadManager.remove(t.id, false) }
+                      }
+                  }
+                  card.addView(row)
+                  if (t.status == Status.DONE) card.setOnClickListener { openFile(t) }
+
+                  return card.apply {
+                      layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(10) }
+                  }
+              }
+
+              private fun openFile(t: Task) {
+                  val uri = t.uri ?: return
+                  runCatching {
+                      startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse(uri), t.mime ?: "*/*")
+                          .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                  }.onFailure { Toast.makeText(this, "열 수 있는 앱이 없거나 파일이 지워졌어요", Toast.LENGTH_SHORT).show() }
+              }
+
+              private fun shareFile(t: Task) {
+                  val uri = t.uri ?: return
+                  val i = Intent(Intent.ACTION_SEND).setType(t.mime ?: "*/*")
+                      .putExtra(Intent.EXTRA_STREAM, Uri.parse(uri))
+                      .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                  startActivity(Intent.createChooser(i, "공유"))
+              }
+
+              private fun confirmDelete(t: Task) {
+                  AlertDialog.Builder(this)
+                      .setTitle("삭제")
+                      .setMessage(t.title)
+                      .setPositiveButton("파일까지 삭제") { _, _ -> DownloadManager.remove(t.id, true) }
+                      .setNeutralButton("기록만 삭제") { _, _ -> DownloadManager.remove(t.id, false) }
+                      .setNegativeButton("취소", null)
+                      .show()
+              }
+
+              private fun copyText(s: String) {
+                  val cm = getSystemService(ClipboardManager::class.java)
+                  cm.setPrimaryClip(android.content.ClipData.newPlainText("url", s))
+                  getSharedPreferences("app", Context.MODE_PRIVATE).edit().putString("lastClip", s).apply()
+                  Toast.makeText(this, "복사했어요", Toast.LENGTH_SHORT).show()
+              }
+
+              private fun humanSize(b: Long): String = when {
+                  b >= 1L shl 30 -> "%.2f GB".format(b / (1L shl 30).toDouble())
+                  b >= 1L shl 20 -> "%.1f MB".format(b / (1L shl 20).toDouble())
+                  b >= 1L shl 10 -> "%.0f KB".format(b / 1024.0)
+                  else -> "$b B"
+              }
+
+              // ==================================================================
+              // yt-dlp 업데이트
+              private fun updateYtDlp() {
+                  updateBtn.isEnabled = false
+                  updateBtn.text = "업데이트 중..."
+                  lifecycleScope.launch {
+                      val msg = withContext(Dispatchers.IO) {
+                          runCatching {
+                              App.initJob.await().getOrThrow()
+                              val st = YoutubeDL.getInstance().updateYoutubeDL(applicationContext)
+                              val ver = YoutubeDL.getInstance().versionName(applicationContext) ?: "?"
+                              if (st == YoutubeDL.UpdateStatus.DONE) "yt-dlp 업데이트 완료 ($ver)" else "이미 최신이에요 ($ver)"
+                          }.getOrElse { "업데이트 실패: ${it.message}" }
+                      }
+                      Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
+                      updateBtn.isEnabled = true
+                      updateBtn.text = "yt-dlp 업데이트 (다운로드가 안 될 때)"
+                  }
+              }
+
+              // ==================================================================
+              // UI 헬퍼
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun rounded(color: Int, radius: Int = 14, stroke: Int? = null) = GradientDrawable().apply {
+                  setColor(color); cornerRadius = dp(radius).toFloat()
+                  if (stroke != null) setStroke(dp(1), stroke)
+              }
+
+              private fun button(text: String, primary: Boolean, onClick: () -> Unit) = Button(this).apply {
+                  this.text = text
+                  isAllCaps = false
+                  textSize = if (primary) 16f else 14f
+                  setTextColor(if (primary) Color.WHITE else blue)
+                  background = if (primary) rounded(blue) else rounded(Color.TRANSPARENT, stroke = blue)
+                  stateListAnimator = null
+                  setOnClickListener { onClick() }
+              }
+
+              private fun hideKeyboard() {
+                  getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(window.decorView.windowToken, 0)
+              }
+
+              private fun selectTab(i: Int) {
+                  currentTab = i
+                  pages.forEachIndexed { idx, v -> v.visibility = if (idx == i) View.VISIBLE else View.GONE }
+                  tabButtons.forEachIndexed { idx, b ->
+                      b.setTextColor(if (idx == i) blue else gray)
+                      b.setTypeface(null, if (idx == i) Typeface.BOLD else Typeface.NORMAL)
+                  }
+                  hideKeyboard()
+              }
+
+              // ==================================================================
+              // 화면 구성
+              private fun buildUi(): View {
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  val content = FrameLayout(this)
+                  root.addView(content, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+
+                  val browserPage = buildBrowserPage()
+                  val linkPage = buildLinkPage()
+                  val filesPage = buildFilesPage()
+                  pages = listOf(browserPage, linkPage, filesPage)
+                  pages.forEach { content.addView(it, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)) }
+
+                  // 하단 탭
+                  root.addView(View(this).apply { setBackgroundColor(Color.parseColor("#22888888")) }, LinearLayout.LayoutParams(MATCH_PARENT, dp(1)))
+                  val nav = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  tabButtons = listOf("🌐 브라우저", "🔗 링크", "⬇ 다운로드").mapIndexed { idx, label ->
+                      TextView(this).apply {
+                          text = label
+                          gravity = Gravity.CENTER
+                          textSize = 14f
+                          setPadding(0, dp(14), 0, dp(14))
+                          setOnClickListener { selectTab(idx) }
+                      }.also { nav.addView(it, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)) }
+                  }
+                  root.addView(nav)
+                  return root
+              }
+
+              private fun buildBrowserPage(): View {
+                  val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+                  val bar = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(dp(8), dp(8), dp(8), dp(6))
+                  }
+                  bar.addView(TextView(this).apply {
+                      text = "⌂"
+                      textSize = 22f
+                      setTextColor(blue)
+                      setPadding(dp(8), 0, dp(10), 0)
+                      setOnClickListener { showHome() }
+                  })
+                  addressBar = EditText(this).apply {
+                      hint = "주소 또는 검색어"
+                      textSize = 14f
+                      isSingleLine = true
+                      imeOptions = EditorInfo.IME_ACTION_GO
+                      setSelectAllOnFocus(true)
+                      setPadding(dp(12), dp(8), dp(12), dp(8))
+                      background = rounded(Color.parseColor("#1A2563EB"), 20)
+                      setOnEditorActionListener { v, actionId, event ->
+                          if (actionId == EditorInfo.IME_ACTION_GO ||
+                              (event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
+                          ) { loadUrl(v.text.toString()); true } else false
+                      }
+                  }
+                  bar.addView(addressBar, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                  bar.addView(TextView(this).apply {
+                      text = "↻"
+                      textSize = 20f
+                      setTextColor(blue)
+                      setPadding(dp(12), 0, dp(6), 0)
+                      setOnClickListener { if (homeView.visibility != View.VISIBLE) webView.reload() }
+                  })
+                  page.addView(bar)
+
+                  pageProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+                      max = 100
+                      visibility = View.INVISIBLE
+                  }
+                  page.addView(pageProgress, LinearLayout.LayoutParams(MATCH_PARENT, dp(3)))
+
+                  val frame = FrameLayout(this)
+                  webView = WebView(this).apply { visibility = View.INVISIBLE }
+                  setupWebView(webView)
+                  frame.addView(webView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+
+                  homeView = buildHome()
+                  frame.addView(homeView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+
+                  fab = TextView(this).apply {
+                      textSize = 15f
+                      setTextColor(Color.WHITE)
+                      setTypeface(typeface, Typeface.BOLD)
+                      setPadding(dp(18), dp(12), dp(18), dp(12))
+                      background = rounded(blue, 24)
+                      elevation = dp(6).toFloat()
+                      visibility = View.GONE
+                      setOnClickListener { onFabClick() }
+                  }
+                  frame.addView(fab, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.END).apply {
+                      setMargins(dp(16), dp(16), dp(16), dp(16))
+                  })
+                  page.addView(frame, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+                  updateFab()
+                  return page
+              }
+
+              private fun buildHome(): View {
+                  val box = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(16), dp(16), dp(16), dp(16))
+                  }
+                  box.addView(TextView(this).apply {
+                      text = "찬다운로더"
+                      textSize = 26f
+                      setTypeface(typeface, Typeface.BOLD)
+                      setTextColor(blue)
+                  })
+                  box.addView(TextView(this).apply {
+                      text = "사이트에 들어가서 영상을 연 다음, 오른쪽 아래 ⬇ 버튼을 누르세요.\n로그인이 필요한 영상도 여기서 로그인하면 받을 수 있어요."
+                      textSize = 13f
+                      setTextColor(gray)
+                      setPadding(0, dp(4), 0, dp(16))
+                  })
+                  shortcuts.chunked(3).forEach { rowItems ->
+                      val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                      rowItems.forEach { (name, url) ->
+                          row.addView(TextView(this).apply {
+                              text = name
+                              gravity = Gravity.CENTER
+                              textSize = 14f
+                              setTextColor(blue)
+                              setPadding(dp(4), dp(18), dp(4), dp(18))
+                              background = rounded(Color.parseColor("#142563EB"), 14)
+                              setOnClickListener { loadUrl(url) }
+                          }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { setMargins(dp(4), dp(4), dp(4), dp(4)) })
+                      }
+                      repeat(3 - rowItems.size) { row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f)) }
+                      box.addView(row)
+                  }
+                  return ScrollView(this).apply { addView(box); setBackgroundColor(Color.TRANSPARENT) }
+              }
+
+              private fun buildLinkPage(): View {
+                  val box = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(20), dp(24), dp(20), dp(20))
+                  }
+                  box.addView(TextView(this).apply {
+                      text = "링크로 받기"
+                      textSize = 24f
+                      setTypeface(typeface, Typeface.BOLD)
+                      setTextColor(blue)
+                  })
+                  box.addView(TextView(this).apply {
+                      text = "유튜브·인스타·X·틱톡 등 1000개 이상 사이트 지원\n다른 앱에서 공유 → 찬다운로더 로도 받을 수 있어요."
+                      textSize = 13f
+                      setTextColor(gray)
+                      setPadding(0, dp(2), 0, dp(16))
+                  })
+                  urlInput = EditText(this).apply {
+                      hint = "영상 링크 붙여넣기"
+                      textSize = 15f
+                      maxLines = 3
+                      setPadding(dp(14), dp(14), dp(14), dp(14))
+                      background = rounded(Color.parseColor("#1A2563EB"))
+                  }
+                  box.addView(urlInput, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+                  val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(10), 0, 0) }
+                  row.addView(button("붙여넣기", false) {
+                      val cm = getSystemService(ClipboardManager::class.java)
+                      val clip = cm.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
+                      urlInput.setText(extractUrl(clip) ?: clip)
+                  }, LinearLayout.LayoutParams(0, dp(44), 1f))
+                  row.addView(View(this), LinearLayout.LayoutParams(dp(10), 1))
+                  row.addView(button("지우기", false) { urlInput.setText("") }, LinearLayout.LayoutParams(0, dp(44), 1f))
+                  box.addView(row)
+
+                  fun currentUrl(): String? = extractUrl(urlInput.text.toString().trim()).also {
+                      if (it == null) Toast.makeText(this, "올바른 링크(http...)를 넣어주세요", Toast.LENGTH_SHORT).show()
+                  }
+
+                  box.addView(button("화질 선택해서 다운로드", true) {
+                      currentUrl()?.let { showFormatPicker(it, null, null) }
+                  }, LinearLayout.LayoutParams(MATCH_PARENT, dp(54)).apply { topMargin = dp(16) })
+
+                  val quick = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(10), 0, 0) }
+                  quick.addView(button("⚡ 최고화질 바로", false) {
+                      currentUrl()?.let { DownloadManager.enqueue(this, it, null, DownloadManager.BEST_VIDEO); selectTab(TAB_FILES) }
+                  }, LinearLayout.LayoutParams(0, dp(46), 1f))
+                  quick.addView(View(this), LinearLayout.LayoutParams(dp(10), 1))
+                  quick.addView(button("🎵 MP3 바로", false) {
+                      currentUrl()?.let { DownloadManager.enqueue(this, it, null, DownloadManager.MP3); selectTab(TAB_FILES) }
+                  }, LinearLayout.LayoutParams(0, dp(46), 1f))
+                  box.addView(quick)
+
+                  box.addView(button("브라우저에서 열기", false) {
+                      currentUrl()?.let { selectTab(TAB_BROWSER); loadUrl(it) }
+                  }, LinearLayout.LayoutParams(MATCH_PARENT, dp(46)).apply { topMargin = dp(10) })
+
+                  updateBtn = button("yt-dlp 업데이트 (다운로드가 안 될 때)", false) { updateYtDlp() }
+                  box.addView(updateBtn, LinearLayout.LayoutParams(MATCH_PARENT, dp(46)).apply { topMargin = dp(28) })
+
+                  box.addView(TextView(this).apply {
+                      text = "저장 위치: 내 파일 → 다운로드 → ${DownloadManager.SAVE_FOLDER}"
+                      textSize = 12f
+                      setTextColor(gray)
+                      gravity = Gravity.CENTER
+                      setPadding(0, dp(12), 0, 0)
+                  })
+                  return ScrollView(this).apply { addView(box) }
+              }
+
+              private fun buildFilesPage(): View {
+                  val page = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(16), dp(20), dp(16), 0)
+                  }
+                  val header = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                  }
+                  header.addView(TextView(this).apply {
+                      text = "다운로드"
+                      textSize = 24f
+                      setTypeface(typeface, Typeface.BOLD)
+                      setTextColor(blue)
+                  }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                  header.addView(TextView(this).apply {
+                      text = "기록 지우기"
+                      textSize = 14f
+                      setTextColor(blue)
+                      setPadding(dp(10), dp(8), dp(4), dp(8))
+                      setOnClickListener {
+                          AlertDialog.Builder(this@MainActivity)
+                              .setMessage("완료·실패한 기록을 모두 지울까요?\n(받은 파일은 그대로 남아요)")
+                              .setPositiveButton("지우기") { _, _ -> DownloadManager.clearFinished() }
+                              .setNegativeButton("취소", null)
+                              .show()
+                      }
+                  })
+                  page.addView(header)
+
+                  emptyText = TextView(this).apply {
+                      text = "아직 받은 파일이 없어요.\n브라우저나 링크 탭에서 받아보세요."
+                      textSize = 14f
+                      setTextColor(gray)
+                      gravity = Gravity.CENTER
+                      setPadding(0, dp(60), 0, 0)
+                  }
+                  page.addView(emptyText)
+
+                  listBox = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(0, dp(12), 0, dp(12))
+                  }
+                  page.addView(ScrollView(this).apply { addView(listBox) }, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+                  return page
+              }
+          }
+          EOF_CHAN
+          echo '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' | base64 -d > app/chan-release.jks
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Build release APK
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/release/*.apk out/ChanDownloader.apk
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChanDownloader
+          path: out/ChanDownloader.apk
+
+      - name: Publish to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: ChanDownloader build ${{ github.run_number }}
+          files: out/ChanDownloader.apk
+          make_latest: true
