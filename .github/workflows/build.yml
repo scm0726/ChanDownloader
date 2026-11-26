@@ -57,8 +57,8 @@ jobs:
                   applicationId = "com.chan.downloader"
                   minSdk = 29
                   targetSdk = 34
-                  versionCode = 2
-                  versionName = "1.1.0"
+                  versionCode = 3
+                  versionName = "1.2.0"
                   ndk { abiFilters += listOf("arm64-v8a") }
               }
 
@@ -104,6 +104,7 @@ jobs:
           dependencies {
               implementation("io.github.junkfood02.youtubedl-android:library:0.17.2")
               implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.17.2")
+              implementation("io.github.junkfood02.youtubedl-android:aria2c:0.17.2")
               implementation("androidx.core:core-ktx:1.13.1")
               implementation("androidx.appcompat:appcompat:1.7.0")
               implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
@@ -121,6 +122,8 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
               <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
               <application
                   android:name=".App"
@@ -185,6 +188,7 @@ jobs:
           import android.app.Application
           import android.app.NotificationChannel
           import android.app.NotificationManager
+          import com.yausername.aria2c.Aria2c
           import com.yausername.ffmpeg.FFmpeg
           import com.yausername.youtubedl_android.YoutubeDL
           import kotlinx.coroutines.CoroutineScope
@@ -192,6 +196,7 @@ jobs:
           import kotlinx.coroutines.Dispatchers
           import kotlinx.coroutines.SupervisorJob
           import kotlinx.coroutines.async
+          import kotlinx.coroutines.launch
 
           class App : Application() {
 
@@ -213,6 +218,18 @@ jobs:
                       runCatching {
                           YoutubeDL.getInstance().init(this@App)
                           FFmpeg.getInstance().init(this@App)
+                          runCatching { Aria2c.getInstance().init(this@App) }
+                          Unit
+                      }
+                  }
+                  // 하루에 한 번 yt-dlp 자동 업데이트 (사이트가 바뀌면 분석이 실패하므로)
+                  appScope.launch {
+                      if (initJob.await().isFailure) return@launch
+                      val prefs = getSharedPreferences("app", MODE_PRIVATE)
+                      val last = prefs.getLong("ytdlpUpdated", 0L)
+                      if (System.currentTimeMillis() - last > 24L * 3600 * 1000) {
+                          runCatching { YoutubeDL.getInstance().updateYoutubeDL(this@App) }
+                              .onSuccess { prefs.edit().putLong("ytdlpUpdated", System.currentTimeMillis()).apply() }
                       }
                   }
               }
@@ -279,6 +296,11 @@ jobs:
               val tasks: StateFlow<List<Task>> = _tasks
 
               private val jobs = HashMap<String, Job>()
+
+              /** 고속 다운로드(aria2c 16개 연결) 사용 여부 */
+              var fastMode: Boolean
+                  get() = app.getSharedPreferences("app", Context.MODE_PRIVATE).getBoolean("fastMode", true)
+                  set(v) { app.getSharedPreferences("app", Context.MODE_PRIVATE).edit().putBoolean("fastMode", v).apply() }
               private val semaphore = Semaphore(MAX_PARALLEL)
               private lateinit var app: Context
 
@@ -394,15 +416,23 @@ jobs:
 
                   val tmpDir = File(app.cacheDir, "dl_$id").apply { mkdirs() }
                   try {
-                      val req = YoutubeDLRequest(task.url).apply {
+                      fun buildRequest(useAria: Boolean) = YoutubeDLRequest(task.url).apply {
                           addOption("-o", tmpDir.absolutePath + "/%(title).80B [%(id)s].%(ext)s")
                           addOption("--no-playlist")
                           addOption("--no-mtime")
                           addOption("--windows-filenames")
+                          // 조각(HLS·DASH) 영상은 8개씩 동시에 받기
+                          addOption("--concurrent-fragments", "8")
+                          addOption("--retries", "10")
+                          addOption("--fragment-retries", "10")
+                          if (useAria) {
+                              // 고속: 파일 하나를 16개 연결로 나눠 받기
+                              addOption("--downloader", "libaria2c.so")
+                              addOption("--downloader-args", "aria2c:-x 16 -s 16 -k 1M --file-allocation=none")
+                          }
                           if (referer != null) addOption("--referer", referer)
                           if (cookieFile != null) addOption("--cookies", cookieFile.absolutePath)
                           option.args.forEachIndexed { i, a ->
-                              // "-f" 다음 값처럼 짝으로 넣기 위해 순서대로 그대로 추가
                               if (a.startsWith("-")) {
                                   val next = option.args.getOrNull(i + 1)
                                   if (next != null && !next.startsWith("-")) addOption(a, next) else addOption(a)
@@ -410,11 +440,24 @@ jobs:
                           }
                       }
 
-                      update(id) { it.copy(message = "다운로드 중...") }
-                      YoutubeDL.getInstance().execute(req, id) { progress, eta, _ ->
+                      val callback: (Float, Long, String) -> Unit = { progress, eta, _ ->
                           val p = progress.toInt().coerceIn(-1, 100)
                           val etaText = if (eta > 0) " · ${formatEta(eta)} 남음" else ""
                           update(id) { it.copy(progress = p, message = "다운로드 중 ${p.coerceAtLeast(0)}%$etaText") }
+                      }
+
+                      update(id) { it.copy(message = "다운로드 중...") }
+                      val useAria = fastMode
+                      try {
+                          YoutubeDL.getInstance().execute(buildRequest(useAria), id, callback)
+                      } catch (e: YoutubeDL.CanceledException) {
+                          throw e
+                      } catch (e: Exception) {
+                          if (!useAria) throw e
+                          // 고속 모드가 안 되는 사이트면 일반 모드로 한 번 더
+                          tmpDir.listFiles()?.forEach { it.deleteRecursively() }
+                          update(id) { it.copy(progress = -1, message = "일반 모드로 다시 시도 중...") }
+                          YoutubeDL.getInstance().execute(buildRequest(false), id, callback)
                       }
 
                       val files = tmpDir.listFiles()
@@ -510,6 +553,8 @@ jobs:
           import android.content.Context
           import android.content.Intent
           import android.content.pm.ServiceInfo
+          import android.net.wifi.WifiManager
+          import android.os.PowerManager
           import android.os.IBinder
           import androidx.core.app.NotificationCompat
           import androidx.core.app.NotificationManagerCompat
@@ -530,6 +575,40 @@ jobs:
               }
 
               private var watcher: Job? = null
+              private var wakeLock: PowerManager.WakeLock? = null
+              private var wifiLock: WifiManager.WifiLock? = null
+
+              /** 화면이 꺼져도 CPU·와이파이가 잠들지 않게 붙잡기 */
+              @Suppress("DEPRECATION")
+              private fun acquireLocks() {
+                  if (wakeLock?.isHeld != true) {
+                      wakeLock = getSystemService(PowerManager::class.java)
+                          .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ChanDownloader:download")
+                          .apply { setReferenceCounted(false); acquire(6 * 60 * 60 * 1000L) }
+                  }
+                  if (wifiLock?.isHeld != true) {
+                      runCatching {
+                          val wm = applicationContext.getSystemService(WifiManager::class.java)
+                          wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ChanDownloader:wifi").apply {
+                              setReferenceCounted(false); acquire()
+                          }
+                      }
+                  }
+              }
+
+              private fun releaseLocks() {
+                  runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
+                  runCatching { if (wifiLock?.isHeld == true) wifiLock?.release() }
+                  wakeLock = null
+                  wifiLock = null
+              }
+
+              override fun onDestroy() {
+                  releaseLocks()
+                  watcher?.cancel()
+                  super.onDestroy()
+              }
+
 
               override fun onBind(intent: Intent?): IBinder? = null
 
@@ -538,6 +617,7 @@ jobs:
                       this, NOTI_ID, build("준비 중...", -1, 1),
                       ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
                   )
+                  acquireLocks()
                   if (watcher?.isActive != true) {
                       watcher = App.appScope.launch {
                           var hadActive = false
@@ -545,6 +625,7 @@ jobs:
                               val active = list.filter { it.active }
                               if (active.isEmpty()) {
                                   if (hadActive) notifyDone(list)
+                                  releaseLocks()
                                   ServiceCompat.stopForeground(this@DownloadService, ServiceCompat.STOP_FOREGROUND_REMOVE)
                                   stopSelf()
                                   watcher?.cancel()
@@ -623,6 +704,8 @@ jobs:
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
+          import android.os.PowerManager
+          import android.provider.Settings
           import android.text.TextUtils
           import android.view.Gravity
           import android.view.KeyEvent
@@ -639,6 +722,7 @@ jobs:
           import android.webkit.WebView
           import android.webkit.WebViewClient
           import android.widget.Button
+          import android.widget.CheckBox
           import android.widget.EditText
           import android.widget.FrameLayout
           import android.widget.LinearLayout
@@ -743,6 +827,34 @@ jobs:
 
                   selectTab(intent?.getIntExtra(EXTRA_TAB, TAB_BROWSER) ?: TAB_BROWSER)
                   handleShare(intent)
+                  askBatteryExemption(force = false)
+              }
+
+              /** 배터리 최적화 예외 — 화면 꺼짐·앱 나감 상태에서도 다운로드가 끊기지 않게 */
+              private fun isBatteryExempt(): Boolean =
+                  getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+
+              @SuppressLint("BatteryLife")
+              private fun askBatteryExemption(force: Boolean) {
+                  if (isBatteryExempt()) {
+                      if (force) Toast.makeText(this, "이미 배터리 제한 없음으로 설정돼 있어요", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  val prefs = getSharedPreferences("app", Context.MODE_PRIVATE)
+                  if (!force && prefs.getBoolean("batteryNever", false)) return
+                  AlertDialog.Builder(this)
+                      .setTitle("백그라운드 다운로드 허용")
+                      .setMessage("화면을 끄거나 앱을 나가도 다운로드가 계속되려면 배터리 사용을 '제한 없음'으로 바꿔야 해요.\n\n다음 화면에서 '허용'을 눌러주세요.")
+                      .setPositiveButton("허용하러 가기") { _, _ ->
+                          runCatching {
+                              startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+                          }.onFailure {
+                              runCatching { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+                          }
+                      }
+                      .setNeutralButton("다시 묻지 않기") { _, _ -> prefs.edit().putBoolean("batteryNever", true).apply() }
+                      .setNegativeButton("나중에", null)
+                      .show()
               }
 
               override fun onNewIntent(intent: Intent) {
@@ -830,16 +942,25 @@ jobs:
                           if (opt === DownloadManager.BEST_VIDEO) "⭐ ${opt.label} (추천)" else opt.label
                       }.toTypedArray<CharSequence>()
 
-                      val dur = info?.duration ?: 0
-                      val subtitle = buildString {
-                          if (dur > 0) append("길이 ${dur / 60}:${"%02d".format(dur % 60)}  ")
-                          info?.extractorKey?.let { append("· $it") }
-                          if (info == null) {
-                              append("⚠ 분석 실패 — 그래도 받아볼 수 있어요\n")
-                              append(result.exceptionOrNull()?.message?.lines()?.lastOrNull { it.isNotBlank() }?.take(150) ?: "")
-                          }
+                      if (info == null) {
+                          val err = result.exceptionOrNull()?.message?.lines()
+                              ?.filter { it.isNotBlank() }?.takeLast(4)?.joinToString("\n")?.take(500) ?: "알 수 없는 오류"
+                          AlertDialog.Builder(this@MainActivity)
+                              .setTitle("분석 실패")
+                              .setMessage("$err\n\n분석 없이 바로 받아보거나, yt-dlp를 업데이트한 뒤 다시 시도해 보세요.")
+                              .setPositiveButton("최고화질로 바로 받기") { _, _ ->
+                                  DownloadManager.enqueue(this@MainActivity, url, title, DownloadManager.BEST_VIDEO, referer)
+                                  selectTab(TAB_FILES)
+                              }
+                              .setNeutralButton("업데이트 후 재시도") { _, _ ->
+                                  updateYtDlp { showFormatPicker(url, referer, titleHint) }
+                              }
+                              .setNegativeButton("닫기", null)
+                              .show()
+                          return@launch
                       }
-                      if (subtitle.isNotBlank()) Toast.makeText(this@MainActivity, subtitle, Toast.LENGTH_LONG).show()
+                      val dur = info.duration
+                      if (dur > 0) Toast.makeText(this@MainActivity, "길이 ${dur / 60}:${"%02d".format(dur % 60)}", Toast.LENGTH_SHORT).show()
 
                       AlertDialog.Builder(this@MainActivity)
                           .setTitle(title)
@@ -1082,7 +1203,7 @@ jobs:
 
               // ==================================================================
               // yt-dlp 업데이트
-              private fun updateYtDlp() {
+              private fun updateYtDlp(after: (() -> Unit)? = null) {
                   updateBtn.isEnabled = false
                   updateBtn.text = "업데이트 중..."
                   lifecycleScope.launch {
@@ -1095,6 +1216,11 @@ jobs:
                           }.getOrElse { "업데이트 실패: ${it.message}" }
                       }
                       Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
+                      if (!msg.startsWith("업데이트 실패")) {
+                          getSharedPreferences("app", Context.MODE_PRIVATE).edit()
+                              .putLong("ytdlpUpdated", System.currentTimeMillis()).apply()
+                      }
+                      after?.invoke()
                       updateBtn.isEnabled = true
                       updateBtn.text = "yt-dlp 업데이트 (다운로드가 안 될 때)"
                   }
@@ -1327,8 +1453,19 @@ jobs:
                       currentUrl()?.let { selectTab(TAB_BROWSER); loadUrl(it) }
                   }, LinearLayout.LayoutParams(MATCH_PARENT, dp(46)).apply { topMargin = dp(10) })
 
+                  box.addView(CheckBox(this).apply {
+                      text = "⚡ 고속 다운로드 (파일을 16개 연결로 나눠 받기)"
+                      textSize = 14f
+                      isChecked = DownloadManager.fastMode
+                      setOnCheckedChangeListener { _, c -> DownloadManager.fastMode = c }
+                  }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(20) })
+
+                  box.addView(button("🔋 백그라운드 다운로드 허용 (배터리 제한 없음)", false) {
+                      askBatteryExemption(force = true)
+                  }, LinearLayout.LayoutParams(MATCH_PARENT, dp(46)).apply { topMargin = dp(8) })
+
                   updateBtn = button("yt-dlp 업데이트 (다운로드가 안 될 때)", false) { updateYtDlp() }
-                  box.addView(updateBtn, LinearLayout.LayoutParams(MATCH_PARENT, dp(46)).apply { topMargin = dp(28) })
+                  box.addView(updateBtn, LinearLayout.LayoutParams(MATCH_PARENT, dp(46)).apply { topMargin = dp(10) })
 
                   box.addView(TextView(this).apply {
                       text = "저장 위치: 내 파일 → 다운로드 → ${DownloadManager.SAVE_FOLDER}"
